@@ -186,13 +186,21 @@ start_with_node() {
 
 action_switch() {
     sudo -v
-    echo "→ 拉取节点列表(可能要几秒)..."
+    echo "→ 拉取节点列表(每节点 ~10s,缓慢正常)。日志会实时显示在下面。"
+    hr
     local tsv
-    tsv="$(sudo "$BIN" --list "$CONF" 2>"$LIST_ERR")" || {
-        err "拉取节点失败,日志:"
-        tail -20 "$LIST_ERR" >&2
+    # tee stderr to both terminal (so QR-scan prompts / errors are visible)
+    # and to LIST_ERR (so we can grep / report later).
+    if ! tsv="$(sudo "$BIN" --list "$CONF" 2> >(tee "$LIST_ERR" >&2))"; then
+        hr
+        err "拉取节点失败 (退出码 $?)。完整日志在 $LIST_ERR"
+        echo "  常见原因 / 修法:" >&2
+        echo "    cookie 过期 / 登录已过期(101)→ 选菜单的 Re-login,或" >&2
+        echo "      sudo $BIN --login-only $CONF" >&2
+        echo "    服务端不可达 → 检查公司网络 / 排查 $CONF 里的 server 字段" >&2
         return 1
-    }
+    fi
+    hr
     if [[ -z "$tsv" ]]; then
         err "服务端返回 0 节点"
         return 1
@@ -234,6 +242,23 @@ action_disconnect() {
     echo "✓ 已断开"
 }
 
+action_relogin() {
+    hr
+    echo "→ 触发重新登录。如果是飞书,程序会打印一个 https://applink.feishu.cn/... 的 URL。"
+    echo "  在另一个终端跑 'open <URL>' 完成授权,然后回到此终端按回车。"
+    hr
+    sudo -v
+    sudo "$BIN" --login-only "$CONF" 2> >(tee "$LOGIN_ERR" >&2) || {
+        err "登录失败,完整日志在 $LOGIN_ERR"
+        return 1
+    }
+    if [[ "$(jq -r '.state // empty' "$CONF")" == "Login" ]]; then
+        echo "✓ 已重新登录"
+    else
+        err "未进入 Login 状态,看 $LOGIN_ERR"
+    fi
+}
+
 action_status() {
     hr
     detect_status
@@ -262,7 +287,7 @@ action_status() {
 
 while true; do
     status="$(detect_status)"
-    pick="$(printf 'Switch node\nReconnect\nDisconnect\nStatus\nQuit\n' \
+    pick="$(printf 'Switch node\nReconnect\nDisconnect\nStatus\nRe-login\nQuit\n' \
         | fzf --prompt='action> ' --height=40% --reverse --no-sort \
               --header="$status")" || pick=""
     case "${pick:-}" in
@@ -270,6 +295,7 @@ while true; do
         "Reconnect")    action_reconnect ;;
         "Disconnect")   action_disconnect ;;
         "Status")       action_status ;;
+        "Re-login")     action_relogin ;;
         "Quit"|"")      exit 0 ;;
     esac
 done
