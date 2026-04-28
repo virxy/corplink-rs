@@ -93,8 +93,8 @@ setup_wizard() {
     read -rp "用户名 (username,通常是邮箱): " username
     [[ -n "$username" ]] || { err "username 不能为空"; exit 1; }
 
-    platform="$(printf 'larksuite\nlark\nfeilian\nldap\nOIDC\n' \
-        | fzf --prompt='platform> ' --height=30% --reverse --header='选择登录方式 (飞书国际版选 larksuite)')"
+    platform="$(printf 'larksuite\nfeilian\nldap\nOIDC\n' \
+        | fzf --prompt='platform> ' --height=30% --reverse --header='选择登录方式 (飞书/Lark 选 larksuite,LDAP 选 ldap)')"
     [[ -n "$platform" ]] || { err "未选择 platform"; exit 1; }
 
     echo "添加内网网段 (CIDR,直接回车结束)。例如:10.0.0.0/8"

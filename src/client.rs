@@ -350,7 +350,18 @@ impl Client {
 
     fn is_platform_or_default(&self, platform: &str) -> bool {
         if let Some(p) = &self.conf.platform {
-            return p.is_empty() || platform == p;
+            if p.is_empty() || platform == p {
+                return true;
+            }
+            // server returns "larksuite" as alias for lark in many tenants;
+            // accept either spelling so the wizard's choice doesn't matter.
+            let aliases: &[&[&str]] = &[&[PLATFORM_LARK, PLATFORM_LARKSUITE]];
+            for group in aliases {
+                if group.contains(&p.as_str()) && group.contains(&platform) {
+                    return true;
+                }
+            }
+            return false;
         }
         true
     }
