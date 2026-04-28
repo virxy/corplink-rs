@@ -19,8 +19,12 @@ jobs:
     steps:
       - name: checkout code
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - name: init submodules
+        run: |
+          set -x
+          git submodule status
+          git submodule update --init --recursive
+          ls -la libwg/wireguard-go/ | head -10
       - name: setup go
         uses: actions/setup-go@v5
         with:
@@ -56,8 +60,12 @@ jobs:
     steps:
       - name: checkout code
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - name: init submodules
+        run: |
+          set -x
+          git submodule status
+          git submodule update --init --recursive
+          ls -la libwg/wireguard-go/ | head -10
       - name: setup go
         uses: actions/setup-go@v5
         with:
