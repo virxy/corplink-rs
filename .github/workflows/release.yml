@@ -86,10 +86,11 @@ jobs:
         run: cargo build --release
       - name: build tarball
         run: |
-          cd target
-          cp release/corplink-rs .
-          cp ../config/config.json .
-          tar -czf corplink-rs-${{ github.ref_name }}-macos-$(uname -m).tar.gz corplink-rs config.json
+          mkdir -p target/staging
+          cp target/release/corplink-rs target/staging/
+          cp corplink-tui install.sh license.txt target/staging/
+          chmod +x target/staging/corplink-rs target/staging/corplink-tui target/staging/install.sh
+          tar -czf target/corplink-rs-${{ github.ref_name }}-macos-$(uname -m).tar.gz -C target/staging .
       - name: upload package to artifact
         uses: actions/upload-artifact@v6
         with:

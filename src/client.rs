@@ -19,7 +19,8 @@ use sha2::Digest;
 
 use crate::api::{ApiName, ApiUrl, URL_GET_COMPANY};
 use crate::config::{
-    Config, WgConf, PLATFORM_CORPLINK, PLATFORM_LARK, PLATFORM_LDAP, PLATFORM_OIDC,
+    Config, WgConf, PLATFORM_CORPLINK, PLATFORM_LARK, PLATFORM_LARKSUITE, PLATFORM_LDAP,
+    PLATFORM_OIDC,
     STRATEGY_DEFAULT, STRATEGY_LATENCY,
 };
 use crate::qrcode::TerminalQrCode;
@@ -290,7 +291,7 @@ impl Client {
             Err(e) => {log::warn!("failed to generate qr code: {e}");}
         }
         match method {
-            PLATFORM_LARK | PLATFORM_OIDC => {
+            PLATFORM_LARK | PLATFORM_LARKSUITE | PLATFORM_OIDC => {
                 log::info!("press enter if you finish auth");
                 let stdin = io::stdin();
                 stdin.lines().next();
@@ -569,7 +570,7 @@ impl Client {
         bail!("operation failed because of logout: {msg}")
     }
 
-    async fn list_vpn(&mut self) -> Result<Vec<RespVpnInfo>> {
+    pub async fn list_vpn(&mut self) -> Result<Vec<RespVpnInfo>> {
         let resp = self
             .request::<Vec<RespVpnInfo>>(ApiName::ListVPN, None)
             .await?;
@@ -606,8 +607,10 @@ impl Client {
             };
 
             log::info!(
-                "server name {}{}",
+                "server name={} en_name={} ip={}{}",
+                vpn.name,
                 vpn.en_name,
+                vpn.ip,
                 match latency {
                     -1 => " timeout".to_string(),
                     _ => format!(", latency {}ms", latency),
@@ -638,7 +641,7 @@ impl Client {
     }
 
     // ping vpn and return latency in ms. Will return Err on error
-    async fn ping_vpn(&mut self, ip: String, api_port: u16) -> Result<i64> {
+    pub async fn ping_vpn(&mut self, ip: String, api_port: u16) -> Result<i64> {
         {
             // config cookie
             let mut cookie = self
@@ -734,20 +737,19 @@ impl Client {
     pub async fn connect_vpn(&mut self) -> Result<WgConf> {
         let vpn_info = self.list_vpn().await?;
 
-        log::info!(
-            "found {} vpn(s), details: {:?}",
-            vpn_info.len(),
-            vpn_info
-                .iter()
-                .map(|i| i.en_name.clone())
-                .collect::<Vec<String>>()
-        );
+        log::info!("found {} vpn(s)", vpn_info.len());
+        for v in &vpn_info {
+            log::info!("vpn: {:?}", v);
+        }
         let filtered_vpn = vpn_info
             .into_iter()
             .filter(|vpn| {
                 if let Some(server_name) = self.conf.vpn_server_name.clone() {
-                    if vpn.en_name != server_name {
-                        log::info!("skip {}, expect {}", vpn.en_name, server_name);
+                    if vpn.en_name != server_name && vpn.name != server_name {
+                        log::info!(
+                            "skip name={} en_name={}, expect {}",
+                            vpn.name, vpn.en_name, server_name
+                        );
                         return false;
                     }
                 }
@@ -818,11 +820,25 @@ impl Client {
         let address6 = (!wg_info.ipv6.is_empty())
             .then_some(format!("{}/128", wg_info.ipv6))
             .unwrap_or("".into());
-        let allowed_ips = [
-            wg_info.setting.vpn_route_split,
-            wg_info.setting.v6_route_split.unwrap_or_default(),
-        ]
-        .concat();
+        let use_full_route = self.conf.use_full_route.unwrap_or(false);
+        log::info!("server vpn_route_split: {:?}", wg_info.setting.vpn_route_split);
+        log::info!("server vpn_route_full:  {:?}", wg_info.setting.vpn_route_full);
+        let v4_routes = if use_full_route {
+            log::info!("use_full_route=true, using vpn_route_full as routes");
+            wg_info.setting.vpn_route_full.clone()
+        } else {
+            wg_info.setting.vpn_route_split.clone()
+        };
+        let v6_routes = if use_full_route {
+            wg_info.setting.v6_route_full.clone().unwrap_or_default()
+        } else {
+            wg_info.setting.v6_route_split.clone().unwrap_or_default()
+        };
+        let mut allowed_ips = [v4_routes, v6_routes].concat();
+        if !self.conf.extra_routes.is_empty() {
+            log::info!("extra_routes: {:?}", self.conf.extra_routes);
+            allowed_ips.extend(self.conf.extra_routes.clone());
+        }
         let auto_setup_routes = self.conf.auto_setup_routes.unwrap_or(true);
         let routes = if auto_setup_routes {
             allowed_ips.clone()

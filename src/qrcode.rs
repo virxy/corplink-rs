@@ -1,4 +1,4 @@
-use qrcode::{EcLevel, QrCode, Version};
+use qrcode::QrCode;
 use terminal_graphics::Colour;
 use terminal_graphics::Display;
 
@@ -9,7 +9,7 @@ pub struct TerminalQrCode {
 
 impl TerminalQrCode {
     pub fn from_bytes<D: AsRef<[u8]>>(data: D) -> Result<TerminalQrCode, anyhow::Error> {
-        let code: QrCode = QrCode::with_version(data.as_ref(), Version::Normal(20), EcLevel::L)?;
+        let code: QrCode = QrCode::new(data.as_ref())?;
         Ok(TerminalQrCode { code })
     }
 

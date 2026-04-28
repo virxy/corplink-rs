@@ -15,6 +15,7 @@ pub const PLATFORM_CORPLINK: &str = "feilian";
 pub const PLATFORM_OIDC: &str = "OIDC";
 // aka feishu
 pub const PLATFORM_LARK: &str = "lark";
+pub const PLATFORM_LARKSUITE: &str = "larksuite";
 #[allow(dead_code)]
 pub const PLATFORM_WEIXIN: &str = "weixin";
 // aka dingding
@@ -48,6 +49,9 @@ pub struct Config {
     pub vpn_select_strategy: Option<String>,
     pub use_vpn_dns: Option<bool>,
     pub auto_setup_routes: Option<bool>,
+    #[serde(default)]
+    pub extra_routes: Vec<String>,
+    pub use_full_route: Option<bool>,
 }
 
 impl fmt::Display for Config {

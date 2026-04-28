@@ -1,0 +1,275 @@
+#!/usr/bin/env bash
+# corplink-tui — interactive front-end for corplink-rs
+#   first run:  setup wizard (company / username / platform / extra routes / login)
+#   thereafter: main menu (Switch / Reconnect / Disconnect / Status / Quit)
+#
+# requires: corplink-rs (this repo's binary, in same dir or $CORPLINK_HOME), fzf, jq
+set -euo pipefail
+
+# resolve through any chain of symlinks (so `fl` -> ~/.corplink-rs/corplink-tui still works)
+_self="$0"
+while [ -L "$_self" ]; do
+    _t="$(readlink "$_self")"
+    if [[ "$_t" = /* ]]; then _self="$_t"; else _self="$(cd "$(dirname "$_self")" && pwd)/$_t"; fi
+done
+SELF_DIR="$(cd "$(dirname "$_self")" && pwd)"
+
+ROOT="${CORPLINK_HOME:-$HOME/.corplink-rs}"
+BIN="$ROOT/corplink-rs"
+CONF="$ROOT/config.json"
+LOG="$ROOT/run.log"
+LIST_ERR="$ROOT/.list.err"
+LOGIN_ERR="$ROOT/.login.err"
+
+mkdir -p "$ROOT"
+
+# allow running from a freshly checked-out repo (binary lives in target/release or sibling)
+if [[ ! -x "$BIN" ]]; then
+    for cand in "$SELF_DIR/corplink-rs" "$SELF_DIR/target/release/corplink-rs"; do
+        if [[ -x "$cand" ]]; then
+            cp "$cand" "$BIN"
+            chmod +x "$BIN"
+            break
+        fi
+    done
+fi
+
+err() { echo "✗ $*" >&2; }
+hr()  { printf '%*s\n' "${COLUMNS:-60}" '' | tr ' ' '─'; }
+
+require_cmd() {
+    local missing=()
+    for c in "$@"; do command -v "$c" >/dev/null 2>&1 || missing+=("$c"); done
+    if (( ${#missing[@]} )); then
+        err "missing: ${missing[*]}"
+        echo "  install with: brew install ${missing[*]}" >&2
+        exit 1
+    fi
+}
+
+require_cmd fzf jq
+if [[ ! -x "$BIN" ]]; then
+    err "corplink-rs binary not found at $BIN"
+    echo "  re-run install.sh, or build from source: cargo build --release" >&2
+    exit 1
+fi
+
+iface_from_conf() { jq -r '.interface_name // empty' "$CONF" 2>/dev/null; }
+current_node()    { jq -r '.vpn_server_name // empty' "$CONF" 2>/dev/null; }
+
+is_running() {
+    pgrep -f "corplink-rs.*$(basename "$CONF")" >/dev/null 2>&1
+}
+
+is_iface_up() {
+    local iface; iface="$(iface_from_conf)"
+    [[ -n "$iface" ]] && ifconfig "$iface" >/dev/null 2>&1
+}
+
+detect_status() {
+    local iface node
+    iface="$(iface_from_conf)"; iface="${iface:-?}"
+    node="$(current_node)";    node="${node:-(strategy)}"
+    if is_running && is_iface_up; then
+        echo "● CONNECTED  node=$node  iface=$iface  log=$LOG"
+    else
+        echo "○ DISCONNECTED  iface=$iface  (last node: $node)"
+    fi
+}
+
+# ─── setup wizard (first run) ───────────────────────────────────────────────
+
+setup_wizard() {
+    hr
+    echo "首次运行,先配置一下。Ctrl+C 随时退出。"
+    hr
+
+    local company username platform iface
+    local -a extra_routes=()
+
+    read -rp "公司代号 (company_name,例如 playtime): " company
+    [[ -n "$company" ]] || { err "company_name 不能为空"; exit 1; }
+
+    read -rp "用户名 (username,通常是邮箱): " username
+    [[ -n "$username" ]] || { err "username 不能为空"; exit 1; }
+
+    platform="$(printf 'larksuite\nlark\nfeilian\nldap\nOIDC\n' \
+        | fzf --prompt='platform> ' --height=30% --reverse --header='选择登录方式 (飞书国际版选 larksuite)')"
+    [[ -n "$platform" ]] || { err "未选择 platform"; exit 1; }
+
+    echo "添加内网网段 (CIDR,直接回车结束)。例如:10.101.0.0/16"
+    while true; do
+        read -rp "  extra route> " r
+        [[ -z "$r" ]] && break
+        extra_routes+=("$r")
+    done
+
+    iface="utun$((RANDOM % 9000 + 1000))"
+
+    local extra_json
+    extra_json="$(printf '%s\n' "${extra_routes[@]:-}" | jq -R . | jq -s 'map(select(. != ""))')"
+
+    jq -n \
+        --arg company "$company" \
+        --arg username "$username" \
+        --arg platform "$platform" \
+        --arg iface "$iface" \
+        --argjson extra "$extra_json" \
+        '{
+            company_name: $company,
+            username: $username,
+            platform: $platform,
+            interface_name: $iface,
+            use_vpn_dns: true,
+            vpn_select_strategy: "latency",
+            auto_setup_routes: true,
+            extra_routes: $extra
+        }' > "$CONF"
+
+    echo "✓ 写入 $CONF"
+    hr
+    echo "→ 触发首次登录。会拉起公司服务发现 + 飞书扫码。"
+    echo "  程序会打印一个 https://applink.feishu.cn/... 的 URL,在另一个终端跑:"
+    echo "      open '<那个 URL>'"
+    echo "  飞书 App 弹出后授权,然后回到此终端按回车。"
+    hr
+
+    sudo -v
+    sudo "$BIN" --login-only "$CONF" 2>"$LOGIN_ERR" || {
+        err "登录失败,日志:"
+        tail -30 "$LOGIN_ERR" >&2
+        exit 1
+    }
+
+    if [[ "$(jq -r '.state // empty' "$CONF")" != "Login" ]]; then
+        err "未进入 Login 状态,看 $LOGIN_ERR"
+        exit 1
+    fi
+    echo "✓ 登录成功"
+    hr
+}
+
+# ─── actions ────────────────────────────────────────────────────────────────
+
+stop_running() {
+    sudo pkill -INT -f "corplink-rs.*$(basename "$CONF")" 2>/dev/null || true
+    sudo pkill -INT -f "wg-corplink" 2>/dev/null || true
+    for _ in 1 2 3 4 5; do
+        is_running || break
+        sleep 1
+    done
+    sudo pkill -KILL -f "corplink-rs.*$(basename "$CONF")" 2>/dev/null || true
+    sudo pkill -KILL -f "wg-corplink" 2>/dev/null || true
+}
+
+start_with_node() {
+    local node="$1"
+    # persist current node into config so detect_status / reconnect work
+    local tmp; tmp="$(mktemp)"
+    jq --arg n "$node" '.vpn_server_name = $n' "$CONF" > "$tmp" && mv "$tmp" "$CONF"
+    sudo -v
+    : > "$LOG"
+    sudo nohup "$BIN" --server "$node" "$CONF" >"$LOG" 2>&1 < /dev/null &
+    disown $! 2>/dev/null || true
+    echo "→ 已启动,等待接口起来..."
+    for _ in 1 2 3 4 5 6 7 8; do
+        if is_iface_up; then
+            echo "✓ $(detect_status)"
+            return 0
+        fi
+        sleep 1
+    done
+    err "接口未起来,最近日志:"
+    tail -30 "$LOG" >&2
+    return 1
+}
+
+action_switch() {
+    sudo -v
+    echo "→ 拉取节点列表(可能要几秒)..."
+    local tsv
+    tsv="$(sudo "$BIN" --list "$CONF" 2>"$LIST_ERR")" || {
+        err "拉取节点失败,日志:"
+        tail -20 "$LIST_ERR" >&2
+        return 1
+    }
+    if [[ -z "$tsv" ]]; then
+        err "服务端返回 0 节点"
+        return 1
+    fi
+
+    local cur; cur="$(current_node)"
+    local pick
+    pick="$(printf '%s\n' "$tsv" | awk -F'\t' -v cur="$cur" '{
+        marker = ($1 == cur) ? "→ " : "  "
+        lat = ($3 == "-1") ? "timeout" : ($3 "ms")
+        printf "%s%-20s  %-18s  %s\n", marker, $1, $2, lat
+    }' | fzf --prompt='node> ' --height=50% --reverse --no-sort \
+              --header='   name                  ip                  latency')"
+    [[ -z "$pick" ]] && { echo "(取消)"; return 0; }
+    local node; node="$(echo "$pick" | sed 's/^[→ ] *//' | awk '{print $1}')"
+    echo "→ 选择 $node"
+    stop_running
+    start_with_node "$node"
+}
+
+action_reconnect() {
+    local node; node="$(current_node)"
+    if [[ -z "$node" ]]; then
+        echo "(没有上次节点,改用 Switch)"
+        action_switch
+        return
+    fi
+    echo "→ 重连 $node"
+    stop_running
+    start_with_node "$node"
+}
+
+action_disconnect() {
+    if ! is_running && ! is_iface_up; then
+        echo "(已经断开)"
+        return
+    fi
+    stop_running
+    echo "✓ 已断开"
+}
+
+action_status() {
+    hr
+    detect_status
+    hr
+    local iface; iface="$(iface_from_conf)"
+    if [[ -n "$iface" ]] && ifconfig "$iface" >/dev/null 2>&1; then
+        echo "iface $iface:"
+        ifconfig "$iface" | sed 's/^/  /'
+        echo
+        echo "routes via $iface:"
+        netstat -rn -f inet | awk -v i="$iface" '$NF == i {print "  " $0}' | head -15
+    fi
+    hr
+    if [[ -f "$LOG" ]]; then
+        echo "log tail ($LOG):"
+        tail -30 "$LOG" | sed 's/^/  /'
+    fi
+    hr
+    echo "(回车返回菜单)"
+    read -r _
+}
+
+# ─── main ───────────────────────────────────────────────────────────────────
+
+[[ -f "$CONF" ]] || setup_wizard
+
+while true; do
+    status="$(detect_status)"
+    pick="$(printf 'Switch node\nReconnect\nDisconnect\nStatus\nQuit\n' \
+        | fzf --prompt='action> ' --height=40% --reverse --no-sort \
+              --header="$status")" || pick=""
+    case "${pick:-}" in
+        "Switch node")  action_switch ;;
+        "Reconnect")    action_reconnect ;;
+        "Disconnect")   action_disconnect ;;
+        "Status")       action_status ;;
+        "Quit"|"")      exit 0 ;;
+    esac
+done

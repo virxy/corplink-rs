@@ -24,35 +24,50 @@ use anyhow::{anyhow, Context, Result};
 use client::Client;
 use config::{Config, WgConf};
 
-fn print_usage_and_exit(name: &str, conf: &str) {
-    println!("usage:\n\t{} {}", name, conf);
+struct CliArgs {
+    conf_file: String,
+    list_only: bool,
+    login_only: bool,
+    server_override: Option<String>,
+}
+
+fn print_usage_and_exit(name: &str) -> ! {
+    println!(
+        "usage:\n\t{name} [--list] [--login-only] [--server NAME] [config.json]\n\n\
+         options:\n\
+         \t--list           login, print available vpn nodes as TSV (name<TAB>ip<TAB>latency_ms), then exit\n\
+         \t--login-only     run login flow (Lark scan etc), persist cookies, then exit\n\
+         \t--server NAME    override vpn_server_name from config\n"
+    );
     exit(1);
 }
 
-fn parse_arg() -> String {
+fn parse_arg() -> CliArgs {
     let mut conf_file = String::from("config.json");
+    let mut list_only = false;
+    let mut login_only = false;
+    let mut server_override: Option<String> = None;
     let mut args = env::args();
-    // pop name
     let name = args.next().unwrap();
-    match args.len() {
-        0 => {}
-        1 => {
-            // pop arg
-            let arg = args.next().unwrap();
-            match arg.as_str() {
-                "-h" | "--help" => {
-                    print_usage_and_exit(&name, &conf_file);
-                }
-                _ => {
-                    conf_file = arg;
-                }
-            }
-        }
-        _ => {
-            print_usage_and_exit(&name, &conf_file);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-h" | "--help" => print_usage_and_exit(&name),
+            "--list" => list_only = true,
+            "--login-only" => login_only = true,
+            "--server" => match args.next() {
+                Some(v) => server_override = Some(v),
+                None => print_usage_and_exit(&name),
+            },
+            _ if arg.starts_with("--") => print_usage_and_exit(&name),
+            _ => conf_file = arg,
         }
     }
-    conf_file
+    CliArgs {
+        conf_file,
+        list_only,
+        login_only,
+        server_override,
+    }
 }
 
 pub const EPERM: i32 = 1;
@@ -75,10 +90,13 @@ async fn run() -> Result<()> {
     print_version();
     check_privilege();
 
-    let conf_file = parse_arg();
-    let mut conf = Config::from_file(&conf_file)
+    let cli = parse_arg();
+    let mut conf = Config::from_file(&cli.conf_file)
         .await
         .context("failed to load config")?;
+    if let Some(server) = &cli.server_override {
+        conf.vpn_server_name = Some(server.clone());
+    }
     let name = conf
         .interface_name
         .clone()
@@ -112,6 +130,35 @@ async fn run() -> Result<()> {
     let mut c = Client::new(conf).context("failed to initialize client")?;
     let mut logout_retry = true;
     let wg_conf: Option<WgConf>;
+
+    if cli.login_only {
+        if c.need_login() {
+            log::info!("not login yet, try to login");
+            c.login().await.context("login failed")?;
+            log::info!("login success");
+        } else {
+            log::info!("already logged in");
+        }
+        return Ok(());
+    }
+
+    if cli.list_only {
+        if c.need_login() {
+            log::info!("not login yet, try to login");
+            c.login().await.context("login failed")?;
+            log::info!("login success");
+        }
+        let vpns = c.list_vpn().await.context("failed to list vpn")?;
+        for v in &vpns {
+            let latency = match c.ping_vpn(v.ip.clone(), v.api_port).await {
+                Ok(l) => l,
+                Err(_) => -1,
+            };
+            // TSV: name <TAB> ip <TAB> latency_ms (or -1 timeout)
+            println!("{}\t{}\t{}", v.name, v.ip, latency);
+        }
+        return Ok(());
+    }
 
     loop {
         if c.need_login() {

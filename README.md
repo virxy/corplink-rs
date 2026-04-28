@@ -1,40 +1,71 @@
-# corplink-rs
+# corplink-rs (virxy fork)
 
-使用 rust 实现的 [飞连][1] 客户端，支持 Linux/Windows10/MacOS
+[飞连][1] VPN 客户端的 Rust + Go 实现,fork 自 [PinkD/corplink-rs][8]。
 
-# 安装
+此 fork 增加了:
+- TUI 主菜单(切节点 / 状态 / 断开),命令名 `fl`
+- 首次运行交互式向导,无需手写 config
+- `larksuite` 平台别名兼容(原版常量只有 `lark`,服务端实际返回 `larksuite`)
+- QR 码版本自适应(原版 `Version::Normal(20)` 容不下 Lark 的长 deep-link)
+- 新 config 字段 `extra_routes`(私有内网 CIDR 注入)、`use_full_route`(全局模式)
+- 新 CLI flag:`--list`(打印节点 TSV)、`--server NAME`(覆盖 vpn_server_name)、`--login-only`(仅登录)
+- GitHub Releases 自动出包,一行 curl 装好
 
-## ArchLinux
+## 快速开始(macOS arm64)
 
-下载 [release](https://github.com/PinkD/corplink-rs/releases) 中的安装包，并安装
+依赖:`brew install jq fzf`
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/virxy/corplink-rs/master/install.sh | bash
+fl
+```
+
+首次运行会问公司代号 / 用户名 / 平台 / 内网网段(可选),然后用飞书扫码登录。
+之后随时打 `fl` 进 TUI:
+
+```
+○ DISCONNECTED  iface=utun12345
+
+  Switch node
+  Reconnect
+  Disconnect
+  Status
+  Quit
+```
+
+切节点会实时拉服务端列表 + 测每个节点延迟,fzf 选完即切,后台运行不阻塞终端。
+
+## 从源码构建
+
+```bash
+git clone --recurse-submodules git@github.com:virxy/corplink-rs.git
+cd corplink-rs
+cd libwg && ./build.sh && cd ..   # 需要 go >= 1.22
+cargo build --release             # 需要 rust toolchain
+```
+
+构建产物在 `target/release/corplink-rs`,搭配 `corplink-tui` + `install.sh` 使用即可。
+
+## 上游原版安装方式(ArchLinux / 其它平台)
+
+### ArchLinux
+
+下载上游 [release](https://github.com/PinkD/corplink-rs/releases) 中的安装包,并安装:
 
 ```bash
 pacman -U corplink-rs-4.1-1-x86_64.pkg.tar.zst
 ```
 
-> 欢迎贡献其它包管理器的打包脚本
-
-## 手动编译
-
-### linux/macos
+### 手动编译(Linux / Windows)
 
 ```bash
 git clone https://github.com/PinkD/corplink-rs --depth 1
 cd corplink-rs
-# build libwg
-cd libwg
-./build.sh
-# if you are using Windows, you can clone and build libwg maunally
-# ref: wireguard-go/Makefile:libwg
-
+cd libwg && ./build.sh    # Windows 用 build.ps1
+cd ..
 cargo build --release
-# install corplink-rs to your PATH
 mv target/release/corplink-rs /usr/bin/
 ```
-
-### windows
-
-参考 [#34](https://github.com/PinkD/corplink-rs/issues/34)
 
 # 用法
 
@@ -310,3 +341,4 @@ graph TD;
 [5]: https://github.com/PinkD/wireguard-go
 [6]: https://www.wintun.net/
 [7]: https://github.com/tauri-apps/tauri
+[8]: https://github.com/PinkD/corplink-rs
