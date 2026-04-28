@@ -20,11 +20,10 @@ jobs:
       - name: checkout code
         uses: actions/checkout@v4
       - name: init submodules
+        shell: bash
         run: |
-          set -x
           git submodule status
           git submodule update --init --recursive
-          ls -la libwg/wireguard-go/ | head -10
       - name: setup go
         uses: actions/setup-go@v5
         with:
@@ -61,11 +60,10 @@ jobs:
       - name: checkout code
         uses: actions/checkout@v4
       - name: init submodules
+        shell: bash
         run: |
-          set -x
           git submodule status
           git submodule update --init --recursive
-          ls -la libwg/wireguard-go/ | head -10
       - name: setup go
         uses: actions/setup-go@v5
         with:
