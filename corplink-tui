@@ -87,7 +87,7 @@ setup_wizard() {
     local company username platform iface
     local -a extra_routes=()
 
-    read -rp "公司代号 (company_name,例如 playtime): " company
+    read -rp "公司代号 (company_name,飞连后台分配的短码): " company
     [[ -n "$company" ]] || { err "company_name 不能为空"; exit 1; }
 
     read -rp "用户名 (username,通常是邮箱): " username
@@ -97,7 +97,7 @@ setup_wizard() {
         | fzf --prompt='platform> ' --height=30% --reverse --header='选择登录方式 (飞书国际版选 larksuite)')"
     [[ -n "$platform" ]] || { err "未选择 platform"; exit 1; }
 
-    echo "添加内网网段 (CIDR,直接回车结束)。例如:10.101.0.0/16"
+    echo "添加内网网段 (CIDR,直接回车结束)。例如:10.0.0.0/8"
     while true; do
         read -rp "  extra route> " r
         [[ -z "$r" ]] && break

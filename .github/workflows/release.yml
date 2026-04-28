@@ -26,6 +26,7 @@ jobs:
     name: build-archlinux
     needs: ["create-release"]
     runs-on: ubuntu-latest
+    continue-on-error: true  # upstream PinkD/PKGBUILD path; macOS release still succeeds if this fails
     steps:
       - name: checkout code
         uses: actions/checkout@v4
@@ -110,6 +111,7 @@ jobs:
     name: build-windows
     needs: ["create-release"]
     runs-on: windows-latest
+    continue-on-error: true  # upstream-only target; macOS release still succeeds if this fails
     steps:
       - name: checkout code
         uses: actions/checkout@v4
