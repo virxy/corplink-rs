@@ -13,12 +13,12 @@
 
 ## 快速开始(macOS arm64)
 
-依赖:`brew install jq fzf`
-
 ```bash
 curl -fsSL https://raw.githubusercontent.com/virxy/corplink-rs/master/install.sh | bash
 fl
 ```
+
+(脚本会自动用 Homebrew 装 `jq` / `fzf`,没 brew 会提示)
 
 首次运行会问公司代号 / 用户名 / 平台 / 内网网段(可选),然后用飞书扫码登录。
 之后随时打 `fl` 进 TUI:

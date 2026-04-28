@@ -12,9 +12,22 @@ err() { echo "✗ $*" >&2; exit 1; }
 [[ "$(uname -s)" == "Darwin" ]] || err "目前仅支持 macOS。Linux/Windows 见 README 自行编译。"
 [[ "$(uname -m)" == "arm64"  ]] || err "目前仅支持 Apple Silicon (arm64)。Intel mac 需要自己编译。"
 
-for c in curl tar jq fzf; do
-    command -v "$c" >/dev/null 2>&1 || err "缺少依赖 $c,请先 'brew install $c'"
+# curl/tar 是 macOS 自带的;jq/fzf 缺就用 brew 自动装
+for c in curl tar; do
+    command -v "$c" >/dev/null 2>&1 || err "缺少 $c (macOS 应该自带,环境异常)"
 done
+
+missing=()
+for c in jq fzf; do
+    command -v "$c" >/dev/null 2>&1 || missing+=("$c")
+done
+if (( ${#missing[@]} )); then
+    if ! command -v brew >/dev/null 2>&1; then
+        err "缺少 ${missing[*]},且没装 Homebrew。先装 brew:https://brew.sh,再重跑此脚本。"
+    fi
+    echo "→ 自动安装依赖: ${missing[*]}"
+    brew install "${missing[@]}" || err "brew install 失败,请手动 'brew install ${missing[*]}' 后重试"
+fi
 
 mkdir -p "$ROOT" "$BIN_DIR"
 
