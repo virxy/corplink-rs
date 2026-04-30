@@ -36,6 +36,7 @@ const USER_AGENT: &str = "CorpLink/201000 (GooglePixel; Android 10; en)";
 pub struct Client {
     conf: Config,
     cookie: Arc<CookieStoreMutex>,
+    cookie_file: path::PathBuf,
     c: reqwest::Client,
     api_url: ApiUrl,
     date_offset_sec: i32,
@@ -146,6 +147,7 @@ impl Client {
         Ok(Client {
             conf,
             cookie: Arc::clone(&cookie_store),
+            cookie_file,
             c,
             api_url: ApiUrl::new(&conf_bak)?,
             date_offset_sec: 0,
@@ -159,18 +161,24 @@ impl Client {
     }
 
     fn save_cookie(&self) -> Result<()> {
-        let interface_name = self
-            .conf
-            .interface_name
-            .as_ref()
-            .context("interface name missing in config")?;
+        // Bug fix: previously this was opening a *relative* path
+        // ("utun12345_cookies.json") so cookies got written into
+        // wherever the user happened to launch fl from, while the
+        // load path (Client::new) used the absolute conf_dir/...
+        // form — read and write went to different places, login
+        // looked successful but the next request hit "logout 101".
         let mut file = fs::OpenOptions::new()
             .write(true)
             .create(true)
-            .append(false)
-            .open(format!("{}_{}", interface_name, COOKIE_FILE_SUFFIX))
+            .truncate(true)
+            .open(&self.cookie_file)
             .map(io::BufWriter::new)
-            .with_context(|| "failed to open cookie file for writing")?;
+            .with_context(|| {
+                format!(
+                    "failed to open cookie file for writing: {}",
+                    self.cookie_file.display()
+                )
+            })?;
         let c = self
             .cookie
             .lock()
