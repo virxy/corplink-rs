@@ -1,16 +1,27 @@
 use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize, Default)]
+struct DNSBackup {
+    service_dns: HashMap<String, String>,
+    service_dns_search: HashMap<String, String>,
+}
 
 pub struct DNSManager {
+    backup_path: PathBuf,
     service_dns: HashMap<String, String>,
     service_dns_search: HashMap<String, String>,
 }
 
 impl DNSManager {
-    pub fn new() -> DNSManager {
+    pub fn new(backup_path: PathBuf) -> DNSManager {
         DNSManager {
+            backup_path,
             service_dns: HashMap::new(),
             service_dns_search: HashMap::new(),
         }
@@ -85,6 +96,13 @@ impl DNSManager {
             return Ok(());
         }
         self.collect_new_service_dns()?;
+        // Persist a backup BEFORE mutating, so a crashed/killed/hung-on-disconnect
+        // process leaves a marker on disk that the next run (or `fl` Repair DNS)
+        // can use to recover. Without this, a botched run permanently leaves
+        // every network service pinned to whatever DNS the VPN handed out.
+        if let Err(e) = self.write_backup() {
+            log::warn!("failed to write dns backup: {}", e);
+        }
         for service in self.service_dns.keys() {
             Command::new("networksetup")
                 .arg("-setdnsservers")
@@ -131,7 +149,58 @@ impl DNSManager {
                 search_domain
             )
         }
+        // Drop the backup marker after a successful restore.
+        let _ = fs::remove_file(&self.backup_path);
         log::debug!("DNS reset");
         Ok(())
+    }
+
+    fn write_backup(&self) -> Result<()> {
+        let backup = DNSBackup {
+            service_dns: self.service_dns.clone(),
+            service_dns_search: self.service_dns_search.clone(),
+        };
+        let data = serde_json::to_string_pretty(&backup)
+            .context("failed to serialize dns backup")?;
+        if let Some(parent) = self.backup_path.parent() {
+            fs::create_dir_all(parent).ok();
+        }
+        fs::write(&self.backup_path, data).with_context(|| {
+            format!("failed to write dns backup {}", self.backup_path.display())
+        })?;
+        Ok(())
+    }
+
+    /// Look for a stale backup left by a previous run that did not reach
+    /// `restore_dns` (panic, SIGKILL, hang during disconnect_vpn, etc.).
+    /// If found, apply it and remove the file. Returns `Ok(true)` if a
+    /// recovery was performed.
+    pub fn restore_from_stale_backup(path: &Path) -> Result<bool> {
+        if !path.exists() {
+            return Ok(false);
+        }
+        let data = fs::read_to_string(path)
+            .with_context(|| format!("failed to read dns backup {}", path.display()))?;
+        let backup: DNSBackup =
+            serde_json::from_str(&data).context("failed to parse dns backup")?;
+        for (service, dns) in &backup.service_dns {
+            Command::new("networksetup")
+                .arg("-setdnsservers")
+                .arg(service)
+                .args(dns.lines())
+                .status()
+                .with_context(|| format!("failed to reset dns servers for {service}"))?;
+            log::info!("recovered DNS for {} -> {}", service, dns);
+        }
+        for (service, search_domain) in &backup.service_dns_search {
+            Command::new("networksetup")
+                .arg("-setsearchdomains")
+                .arg(service)
+                .args(search_domain.lines())
+                .status()
+                .with_context(|| format!("failed to reset search domains for {service}"))?;
+        }
+        let _ = fs::remove_file(path);
+        Ok(true)
     }
 }

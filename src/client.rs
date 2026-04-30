@@ -840,7 +840,12 @@ impl Client {
         } else {
             wg_info.setting.vpn_route_split.clone()
         };
-        let v6_routes = if use_full_route {
+        let v6_routes = if address6.is_empty() {
+            if use_full_route {
+                log::info!("no v6 address from server, skipping v6 routes");
+            }
+            Vec::new()
+        } else if use_full_route {
             wg_info.setting.v6_route_full.clone().unwrap_or_default()
         } else {
             wg_info.setting.v6_route_split.clone().unwrap_or_default()

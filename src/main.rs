@@ -91,6 +91,29 @@ async fn run() -> Result<()> {
     check_privilege();
 
     let cli = parse_arg();
+
+    // If a previous run died before restore_dns ran (panic, SIGKILL, hang in
+    // disconnect_vpn, ...), the system DNS may still be pinned to the VPN's
+    // DNS — leaving the machine unable to resolve anything once the tunnel
+    // goes away. The backup-marker path lives next to the config file.
+    #[cfg(target_os = "macos")]
+    let dns_backup_path: std::path::PathBuf = {
+        let conf_path = std::path::Path::new(&cli.conf_file);
+        let conf_dir = conf_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        conf_dir.join("dns_backup.json")
+    };
+    #[cfg(target_os = "macos")]
+    match DNSManager::restore_from_stale_backup(&dns_backup_path) {
+        Ok(true) => log::warn!(
+            "recovered DNS from stale backup at {} — previous run did not clean up",
+            dns_backup_path.display()
+        ),
+        Ok(false) => {}
+        Err(e) => log::warn!("failed to restore stale dns backup: {}", e),
+    }
+
     let mut conf = Config::from_file(&cli.conf_file)
         .await
         .context("failed to load config")?;
@@ -195,7 +218,7 @@ async fn run() -> Result<()> {
         .with_context(|| format!("failed to config interface with uapi for {name}"))?;
 
     #[cfg(target_os = "macos")]
-    let mut dns_manager = DNSManager::new();
+    let mut dns_manager = DNSManager::new(dns_backup_path.clone());
 
     #[cfg(target_os = "macos")]
     if use_vpn_dns {
