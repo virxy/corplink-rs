@@ -29,11 +29,18 @@ fl
   Switch node
   Reconnect
   Disconnect
+  Routes
   Status
+  Re-login
+  Repair DNS
+  Purge official Feilian
   Quit
 ```
 
 切节点会实时拉服务端列表 + 测每个节点延迟,fzf 选完即切,后台运行不阻塞终端。
+
+`Purge official Feilian` 是 macOS-only 的清理项:bootout 官方飞连 GUI 客户端的所有自启动(LaunchDaemon / LaunchAgent)、kill 残留进程、tccutil reset 撤销所有 TCC 授权、并提示去系统设置关掉 SealSuite 网络扩展。
+适用场景:已切到 fl 的人想把官方客户端的后台监控/上报/网络拦截一并停掉。**会让公司 IT 看到设备 puppet 心跳消失,自行评估代价。** 操作幂等,IT 推送复活后重跑即可。
 
 ## 从源码构建
 

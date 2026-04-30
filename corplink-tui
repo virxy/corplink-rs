@@ -259,6 +259,124 @@ action_relogin() {
     fi
 }
 
+maybe_reconnect() {
+    # call after a config change that needs the tunnel restarted to take effect.
+    if ! is_running && ! is_iface_up; then
+        echo "(未在连接,改动将在下次启动时生效)"
+        return 0
+    fi
+    read -rp "→ 立即重连以生效?[Y/n] " ans
+    case "${ans:-y}" in
+        n|N|no|No) echo "(已保存,下次连接生效)" ;;
+        *)
+            local node; node="$(current_node)"
+            stop_running
+            if [[ -n "$node" ]]; then
+                start_with_node "$node"
+            else
+                echo "(没有上次节点,改用 Switch 选一个)"
+            fi
+            ;;
+    esac
+}
+
+list_routes() {
+    jq -r '.extra_routes // [] | .[]' "$CONF" 2>/dev/null
+}
+
+action_routes() {
+    local changed=0
+    while true; do
+        hr
+        echo "当前 extra_routes (内网网段):"
+        local cur; cur="$(list_routes)"
+        if [[ -z "$cur" ]]; then
+            echo "  (空)"
+        else
+            echo "$cur" | sed 's/^/  /'
+        fi
+        hr
+        local pick
+        pick="$(printf 'Add\nRemove\nDone\n' \
+            | fzf --prompt='routes> ' --height=30% --reverse --no-sort \
+                  --header='管理内网网段(extra_routes)')" || pick="Done"
+        case "${pick:-Done}" in
+            Add)
+                read -rp "  新网段 (CIDR,例如 10.0.0.0/8): " r
+                [[ -z "$r" ]] && continue
+                local tmp; tmp="$(mktemp)"
+                jq --arg r "$r" '.extra_routes = ((.extra_routes // []) + [$r] | unique)' \
+                    "$CONF" > "$tmp" && mv "$tmp" "$CONF"
+                echo "✓ 已添加 $r"
+                changed=1
+                ;;
+            Remove)
+                if [[ -z "$cur" ]]; then
+                    echo "(空,没什么可删)"
+                    continue
+                fi
+                local victim
+                victim="$(printf '%s\n' "$cur" \
+                    | fzf --prompt='remove> ' --height=30% --reverse --no-sort \
+                          --header='选要删除的网段')" || victim=""
+                [[ -z "$victim" ]] && continue
+                local tmp; tmp="$(mktemp)"
+                jq --arg r "$victim" '.extra_routes = ((.extra_routes // []) | map(select(. != $r)))' \
+                    "$CONF" > "$tmp" && mv "$tmp" "$CONF"
+                echo "✓ 已删除 $victim"
+                changed=1
+                ;;
+            Done|"") break ;;
+        esac
+    done
+    if (( changed )); then
+        maybe_reconnect
+    fi
+}
+
+action_repair_dns() {
+    hr
+    echo "→ 重置所有网络服务的 DNS,修复 fl 异常退出后系统 DNS 被钉死的问题"
+    echo "  (背景:corplink-rs 连接时把每个服务的 DNS 改成 VPN 内部 DNS。如果"
+    echo "   进程在 restore_dns 之前异常退出,改动会跨重启留在系统里,导致没有"
+    echo "   VPN 时全网无法解析。)"
+    hr
+    echo "当前每个服务的 DNS:"
+    networksetup -listallnetworkservices 2>/dev/null | tail -n +2 | while IFS= read -r svc; do
+        [[ -z "$svc" ]] && continue
+        svc="${svc#\*}"
+        local cur
+        cur="$(networksetup -getdnsservers "$svc" 2>/dev/null | tr '\n' ',' | sed 's/,$//')"
+        if [[ "$cur" == *"There aren"* ]]; then cur="(auto/DHCP)"; fi
+        printf '  %-30s  %s\n' "$svc" "$cur"
+    done
+    hr
+    read -rp "全部重置为 DHCP 自动?[Y/n] " ans
+    case "${ans:-y}" in
+        n|N|no|No) echo "(取消)"; return 0 ;;
+    esac
+    sudo -v
+    networksetup -listallnetworkservices 2>/dev/null | tail -n +2 | while IFS= read -r svc; do
+        [[ -z "$svc" ]] && continue
+        svc="${svc#\*}"
+        if sudo networksetup -setdnsservers "$svc" Empty 2>/dev/null; then
+            echo "  ✓ $svc"
+        else
+            echo "  ✗ $svc"
+        fi
+    done
+    # 同步清掉 corplink-rs 留下的 backup 标记,免得下次启动反向把坏值还原回去
+    if [[ -f "$ROOT/dns_backup.json" ]]; then
+        sudo rm -f "$ROOT/dns_backup.json" && echo "  ✓ removed $ROOT/dns_backup.json"
+    fi
+    hr
+    echo "现在的 DNS:"
+    scutil --dns 2>/dev/null | awk '/^\s*nameserver/ {print "  " $0}' | sort -u | head -10
+    hr
+    echo "(回车返回菜单)"
+    read -r _
+}
+
 action_status() {
     hr
     detect_status
@@ -281,21 +399,181 @@ action_status() {
     read -r _
 }
 
+action_purge_official() {
+    hr
+    cat <<'EOF'
+→ 清理官方飞连 (CorpLink) — 自启动 / 进程 / TCC 权限 / 网络扩展
+
+会做:
+  1. bootout 所有 com.volcengine.corplink.* / com.corplink.mdm.policy 启动项
+  2. 把 plist 移到 .disabled 归档(重启不复活)
+  3. kill 所有 corplink / clpolicy / sealsuite 残留进程
+  4. tccutil reset 撤销 5 个相关 bundle 的 TCC 授权
+  5. 检查 SealSuite 网络扩展(com.byteplus.sealsuite.networkextension),
+     若仍 enabled 提示去系统设置关掉
+
+⚠ 后果(请确认):
+  - 公司 IT 会看到你的 puppet 心跳消失(一般 24h 内人工跟进)
+  - 通过官方飞连建立的内网访问(Lark/git/OA 等)会断
+  - 切到 fl(corplink-rs)之后再做这一步,不要让自己彻底失联
+  - 此操作幂等:以后官方飞连若被自更新/IT 推送复活,重跑此项即可
+EOF
+    read -rp "继续?输入 'yes' 确认(其他任何输入都会取消): " ans
+    [[ "$ans" == "yes" ]] || { echo "(取消)"; return; }
+
+    sudo -v
+
+    local user_uid timestamp
+    user_uid="$(id -u)"
+    timestamp="$(date +%Y%m%d-%H%M%S)"
+
+    local -a daemon_labels=(
+        com.volcengine.corplink.service
+        com.volcengine.corplink.systemextension
+        com.corplink.mdm.policy
+    )
+    local -a daemon_plists=(
+        /Library/LaunchDaemons/com.volcengine.corplink.service.plist
+        /Library/LaunchDaemons/com.volcengine.corplink.systemextension.plist
+        /Library/LaunchDaemons/com.corplink.mdm.policy.plist
+    )
+    local -a sysagent_labels=(com.volcengine.corplink.agent)
+    local -a sysagent_plists=(/Library/LaunchAgents/com.volcengine.corplink.agent.plist)
+    local -a useragent_labels=(CorpLink)
+    local -a useragent_plists=("$HOME/Library/LaunchAgents/CorpLink.plist")
+    local -a kill_patterns=(
+        CorpLinkExtension
+        corplink-service
+        clpolicy
+        CorplinkNe
+        "/Applications/CorpLink.app/Contents/MacOS/CorpLink"
+        "CorpLink Helper"
+    )
+    local -a tcc_bundles=(
+        com.volcengine.corplink
+        com.volcengine.corplink.networkextension-wrapper
+        com.volcengine.corplink.systemextension
+        com.byteplus.sealsuite.networkextension
+        com.byteplus.sealsuite.networkextension-controller
+    )
+
+    hr
+    echo "1. bootout 启动项"
+    for l in "${daemon_labels[@]}"; do
+        if sudo launchctl print "system/$l" >/dev/null 2>&1; then
+            sudo launchctl bootout "system/$l" 2>/dev/null && echo "  ✓ system/$l"
+        fi
+    done
+    for l in "${sysagent_labels[@]}"; do
+        if sudo launchctl print "gui/$user_uid/$l" >/dev/null 2>&1; then
+            sudo launchctl bootout "gui/$user_uid/$l" 2>/dev/null && echo "  ✓ gui/$user_uid/$l"
+        fi
+    done
+    for l in "${useragent_labels[@]}"; do
+        if launchctl print "gui/$user_uid/$l" >/dev/null 2>&1; then
+            launchctl bootout "gui/$user_uid/$l" 2>/dev/null && echo "  ✓ gui/$user_uid/$l"
+        fi
+    done
+
+    echo
+    echo "2. 移走 plist"
+    sudo mkdir -p /Library/LaunchDaemons.disabled /Library/LaunchAgents.disabled
+    for p in "${daemon_plists[@]}"; do
+        if [[ -f "$p" ]]; then
+            sudo mv "$p" "/Library/LaunchDaemons.disabled/$(basename "$p").$timestamp" \
+                && echo "  ✓ $(basename "$p")"
+        fi
+    done
+    for p in "${sysagent_plists[@]}"; do
+        if [[ -f "$p" ]]; then
+            sudo mv "$p" "/Library/LaunchAgents.disabled/$(basename "$p").$timestamp" \
+                && echo "  ✓ $(basename "$p")"
+        fi
+    done
+    for p in "${useragent_plists[@]}"; do
+        if [[ -f "$p" ]]; then
+            mv "$p" "$p.disabled.$timestamp" && echo "  ✓ $(basename "$p") (self-heal 复活检测)"
+        fi
+    done
+
+    echo
+    echo "3. kill 残留进程"
+    local killed=0 pids pid
+    for pat in "${kill_patterns[@]}"; do
+        pids="$(pgrep -f "$pat" 2>/dev/null || true)"
+        for pid in $pids; do
+            if sudo kill -9 "$pid" 2>/dev/null; then
+                echo "  ✓ pid=$pid ($pat)"
+                killed=$((killed+1))
+            fi
+        done
+    done
+    (( killed == 0 )) && echo "  (无残留)"
+
+    echo
+    echo "4. 撤销 TCC 权限"
+    local out
+    for bid in "${tcc_bundles[@]}"; do
+        out="$(tccutil reset All "$bid" 2>&1 || true)"
+        case "$out" in
+            Successfully*)         echo "  ✓ $bid" ;;
+            *"No such bundle"*)    : ;;  # bundle 不存在,跳过
+            *)                     echo "  ! $bid: $out" ;;
+        esac
+    done
+
+    echo
+    echo "5. 系统扩展状态"
+    local se
+    se="$(systemextensionsctl list 2>/dev/null | grep -iE "sealsuite|corplink|volcengine|byteplus" || true)"
+    if [[ -n "$se" ]]; then
+        echo "$se" | sed 's/^/  /'
+        if echo "$se" | grep -q "activated enabled"; then
+            echo
+            echo "  ⚠ 还在拦流量。命令行 systemextensionsctl uninstall 受 SIP 限制大概率失败,"
+            echo "     最稳的办法是 GUI 关:"
+            echo "     系统设置 → 通用 → 登录项与扩展 → 网络扩展 → 关掉 SealSuite 开关"
+            read -rp "  → 现在打开系统设置?[Y/n] " ans
+            case "${ans:-y}" in
+                n|N|no|No) ;;
+                *) open "x-apple.systempreferences:com.apple.LoginItems-Settings.extension" 2>/dev/null \
+                   || open "/System/Library/PreferencePanes/Extensions.prefPane" 2>/dev/null ;;
+            esac
+        fi
+    else
+        echo "  ✓ 列表中已无飞连相关扩展"
+    fi
+
+    hr
+    echo "✓ 清理完成。残留进程:"
+    if pgrep -f -E "corplink|clpolicy|sealsuite|byteplus|volcengine" >/dev/null 2>&1; then
+        ps -eo pid,user,comm | grep -iE "corplink|clpolicy|sealsuite|byteplus|volcengine" | grep -v grep | sed 's/^/  /'
+    else
+        echo "  (无)"
+    fi
+    hr
+    echo "(回车返回菜单)"
+    read -r _
+}
+
 # ─── main ───────────────────────────────────────────────────────────────────
 
 [[ -f "$CONF" ]] || setup_wizard
 
 while true; do
     status="$(detect_status)"
-    pick="$(printf 'Switch node\nReconnect\nDisconnect\nStatus\nRe-login\nQuit\n' \
+    pick="$(printf 'Switch node\nReconnect\nDisconnect\nRoutes\nStatus\nRe-login\nRepair DNS\nPurge official Feilian\nQuit\n' \
         | fzf --prompt='action> ' --height=40% --reverse --no-sort \
               --header="$status")" || pick=""
     case "${pick:-}" in
-        "Switch node")  action_switch ;;
-        "Reconnect")    action_reconnect ;;
-        "Disconnect")   action_disconnect ;;
-        "Status")       action_status ;;
-        "Re-login")     action_relogin ;;
-        "Quit"|"")      exit 0 ;;
+        "Switch node")              action_switch ;;
+        "Reconnect")                action_reconnect ;;
+        "Disconnect")               action_disconnect ;;
+        "Routes")                   action_routes ;;
+        "Status")                   action_status ;;
+        "Re-login")                 action_relogin ;;
+        "Repair DNS")               action_repair_dns ;;
+        "Purge official Feilian")   action_purge_official ;;
+        "Quit"|"")                  exit 0 ;;
     esac
 done
