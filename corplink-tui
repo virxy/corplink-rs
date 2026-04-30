@@ -6,6 +6,21 @@
 # requires: corplink-rs (this repo's binary, in same dir or $CORPLINK_HOME), fzf, jq
 set -euo pipefail
 
+# self-elevate: corplink-rs needs root for utun / DNS / route ops. On
+# machines with residual EDR or corporate-VPN endpoint-security hooks
+# (e.g. Sangfor EasyConnect leftovers), the user→root privilege
+# transition partway through a run can get the child SIGKILL'd by
+# whatever ES client is still loaded. Promoting the whole script up
+# front sidesteps that transition entirely.
+# Preserve HOME so we still find the per-user config under
+# ~/.corplink-rs (sudo otherwise resets HOME to /var/root).
+# Re-export PATH because sudo strips it to secure_path, leaving
+# brew-installed fzf/jq unreachable.
+if [[ $EUID -ne 0 ]]; then
+    exec sudo --preserve-env=HOME "$0" "$@"
+fi
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
 # resolve through any chain of symlinks (so `fl` -> ~/.corplink-rs/corplink-tui still works)
 _self="$0"
 while [ -L "$_self" ]; do

@@ -1,6 +1,6 @@
 [package]
 name = "corplink-rs"
-version = "0.5.9"
+version = "0.5.10"
 edition = "2021"
 
 [dependencies]
@@ -45,7 +45,6 @@ byteorder = "1.5"
 log = "0.4"
 env_logger = "0.10"
 libc = "0.2"
-terminal_graphics = "0.1.5"
 qrcode = "0.14.1"
 anyhow = "1.0"
 
