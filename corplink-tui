@@ -21,25 +21,6 @@ if [[ $EUID -ne 0 ]]; then
 fi
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
-# After self-elevate, every internal `sudo XXX` adds no privilege
-# (we're already root) but the real sudo binary still fork+execs
-# the child through PAM / setuid. On machines with leftover EDR
-# Endpoint Security hooks (Sangfor / EasyConnect / similar
-# corporate-VPN stragglers), that PAM-driven exec path occasionally
-# trips the hook and the child gets SIGKILL'd silently — the symptom
-# was "sudo corplink-rs --list" dying with `killed` and no stderr.
-# Shadow sudo with a function that just strips the leading word and
-# runs the rest in-process. The earlier self-elevate (line above)
-# uses /usr/bin/sudo because this function isn't defined yet; from
-# this point on, every "sudo XXX" inside the script bypasses sudo
-# entirely. `sudo -v` is special-cased because it has no equivalent.
-sudo() {
-    case "${1:-}" in
-        -v) return 0 ;;
-        *)  "$@" ;;
-    esac
-}
-
 # resolve through any chain of symlinks (so `fl` -> ~/.corplink-rs/corplink-tui still works)
 _self="$0"
 while [ -L "$_self" ]; do
@@ -83,36 +64,6 @@ fi
 
 err() { echo "✗ $*" >&2; }
 hr()  { printf '%*s\n' "${COLUMNS:-60}" '' | tr ' ' '─'; }
-
-# Run a command synchronously, but detach it from the controlling
-# terminal first (nohup + < /dev/null + & + disown). On machines
-# with leftover EDR Endpoint Security hooks (Sangfor / EasyConnect /
-# similar corporate-VPN residue), the hook SIGKILL's foreground
-# children of TTY-attached bash invocations of corplink-rs the
-# instant they hit certain code paths (--list / --login-only seen
-# dying with exit 137 / `killed`); the same binary launched via
-# `nohup ... < /dev/null &` is left alone (start_with_node already
-# uses this pattern for --server and works fine).
-#
-# Usage: _run_detached <err_file> <cmd> [args...]
-#   - prints the command's stdout to *this* function's stdout,
-#     so callers can do  tsv="$(_run_detached err.log $BIN --list cfg)"
-#   - command's stderr is tee'd to <err_file> AND to our stderr
-#   - returns the command's exit code
-_run_detached() {
-    local err_file="$1"; shift
-    local out_file
-    out_file="$(mktemp -t corplink-out)"
-    : > "$err_file"
-    nohup "$@" > "$out_file" 2> >(tee "$err_file" >&2) < /dev/null &
-    local pid=$!
-    disown "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null
-    local rc=$?
-    cat "$out_file"
-    rm -f "$out_file"
-    return $rc
-}
 
 require_cmd() {
     local missing=()
@@ -212,7 +163,7 @@ setup_wizard() {
     hr
 
     sudo -v
-    _run_detached "$LOGIN_ERR" "$BIN" --login-only "$CONF" >/dev/null || {
+    sudo "$BIN" --login-only "$CONF" 2>"$LOGIN_ERR" || {
         err "登录失败,日志:"
         tail -30 "$LOGIN_ERR" >&2
         exit 1
@@ -268,9 +219,7 @@ action_switch() {
     local tsv
     # tee stderr to both terminal (so QR-scan prompts / errors are visible)
     # and to LIST_ERR (so we can grep / report later).
-    # Run detached to dodge EDR ES hook that SIGKILL's TTY-attached
-    # synchronous corplink-rs invocations (see _run_detached).
-    if ! tsv="$(_run_detached "$LIST_ERR" "$BIN" --list "$CONF")"; then
+    if ! tsv="$(sudo "$BIN" --list "$CONF" 2> >(tee "$LIST_ERR" >&2))"; then
         hr
         err "拉取节点失败 (退出码 $?)。完整日志在 $LIST_ERR"
         echo "  常见原因 / 修法:" >&2
@@ -327,7 +276,7 @@ action_relogin() {
     echo "  在另一个终端跑 'open <URL>' 完成授权,然后回到此终端按回车。"
     hr
     sudo -v
-    _run_detached "$LOGIN_ERR" "$BIN" --login-only "$CONF" >/dev/null || {
+    sudo "$BIN" --login-only "$CONF" 2> >(tee "$LOGIN_ERR" >&2) || {
         err "登录失败,完整日志在 $LOGIN_ERR"
         return 1
     }
