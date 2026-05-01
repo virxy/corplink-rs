@@ -355,29 +355,31 @@ action_full_route() {
     cur="$(jq -r '.use_full_route // false' "$CONF")"
     local label
     [[ "$cur" == "true" ]] && label="全局 (full)" || label="分流 (split)"
-    echo "当前模式: $label"
     echo
-    echo "  full:   所有 IPv4 走 VPN。服务端下发 vpn_route_full"
-    echo "          (0.0.0.0/1 + 128.0.0.0/1) — 不顶替 default route,"
-    echo "          也不会让 VPN server 自身回环。"
-    echo "  split:  只有公司内网/服务走 VPN,公网走原 ISP。用 vpn_route_split。"
+    echo "  开启全局: 所有 IPv4 走 VPN。服务端下发 vpn_route_full"
+    echo "            (0.0.0.0/1 + 128.0.0.0/1) — 不顶替 default route,"
+    echo "            也不会让 VPN server 自身回环。"
+    echo "  关闭全局: 只有公司内网/服务走 VPN,公网走原 ISP。用 vpn_route_split。"
     hr
     local pick
-    pick="$(printf 'Toggle (切到对面)\nKeep current\n' \
+    pick="$(printf '开启全局模式 (full)\n关闭全局模式 (split)\n' \
         | fzf --prompt='full route> ' --height=30% --reverse --no-sort \
-              --header="切换 full route 模式")" || pick="Keep current"
-    case "${pick:-Keep current}" in
-        Toggle*)
-            local new
-            [[ "$cur" == "true" ]] && new=false || new=true
-            local tmp; tmp="$(mktemp)"
-            jq --argjson v "$new" '.use_full_route = $v' "$CONF" > "$tmp" \
-                && mv "$tmp" "$CONF"
-            echo "✓ use_full_route: $cur → $new"
-            maybe_reconnect
-            ;;
-        *) echo "(取消)" ;;
+              --header="当前: $label  — 选目标模式")" || pick=""
+    local new
+    case "${pick:-}" in
+        开启*) new=true ;;
+        关闭*) new=false ;;
+        *)     echo "(取消)"; return ;;
     esac
+    if [[ "$cur" == "$new" ]]; then
+        echo "(已经是 $label,无变化)"
+        return
+    fi
+    local tmp; tmp="$(mktemp)"
+    jq --argjson v "$new" '.use_full_route = $v' "$CONF" > "$tmp" \
+        && mv "$tmp" "$CONF"
+    echo "✓ use_full_route: $cur → $new"
+    maybe_reconnect
 }
 
 action_repair_dns() {
