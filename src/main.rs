@@ -96,10 +96,13 @@ async fn run() -> Result<()> {
 
     let cli = parse_arg();
 
-    // If a previous run died before restore_dns ran (panic, SIGKILL, hang in
-    // disconnect_vpn, ...), the system DNS may still be pinned to the VPN's
-    // DNS — leaving the machine unable to resolve anything once the tunnel
-    // goes away. The backup-marker path lives next to the config file.
+    // Both backup paths are computed eagerly so the DNS/Route managers can
+    // share them later in the connect path. The actual stale-backup
+    // recovery is deferred until we know we're going to establish a
+    // connection (NOT for --list / --login-only, which are auxiliary
+    // commands and would otherwise mistake a healthy tunnel's still-live
+    // backup files for stale leftovers — undoing the live tunnel's DNS
+    // and host route mid-flight).
     #[cfg(target_os = "macos")]
     let dns_backup_path: std::path::PathBuf = {
         let conf_path = std::path::Path::new(&cli.conf_file);
@@ -109,20 +112,6 @@ async fn run() -> Result<()> {
         conf_dir.join("dns_backup.json")
     };
     #[cfg(target_os = "macos")]
-    match DNSManager::restore_from_stale_backup(&dns_backup_path) {
-        Ok(true) => log::warn!(
-            "recovered DNS from stale backup at {} — previous run did not clean up",
-            dns_backup_path.display()
-        ),
-        Ok(false) => {}
-        Err(e) => log::warn!("failed to restore stale dns backup: {}", e),
-    }
-
-    // Same idea for the VPN-server host route used in full-route mode:
-    // if the previous run died before unpin() it left a /32 host route
-    // pinned to the (now-irrelevant) old gateway, which can break
-    // outbound connectivity even after the tunnel is gone.
-    #[cfg(target_os = "macos")]
     let route_backup_path: std::path::PathBuf = {
         let conf_path = std::path::Path::new(&cli.conf_file);
         let conf_dir = conf_path
@@ -130,15 +119,6 @@ async fn run() -> Result<()> {
             .unwrap_or_else(|| std::path::Path::new("."));
         conf_dir.join("route_backup.json")
     };
-    #[cfg(target_os = "macos")]
-    match RouteManager::restore_from_stale_backup(&route_backup_path) {
-        Ok(true) => log::warn!(
-            "recovered VPN server host route from stale backup at {} — previous run did not clean up",
-            route_backup_path.display()
-        ),
-        Ok(false) => {}
-        Err(e) => log::warn!("failed to restore stale route backup: {}", e),
-    }
 
     let mut conf = Config::from_file(&cli.conf_file)
         .await
@@ -209,6 +189,29 @@ async fn run() -> Result<()> {
             println!("{}\t{}\t{}", v.name, v.ip, latency);
         }
         return Ok(());
+    }
+
+    // Now that we know this is the real connect flow (not --list /
+    // --login-only), recover any stale backups left by a previous
+    // crashed run. Doing this earlier would clobber a live tunnel's
+    // backup files when an auxiliary command runs alongside it.
+    #[cfg(target_os = "macos")]
+    match DNSManager::restore_from_stale_backup(&dns_backup_path) {
+        Ok(true) => log::warn!(
+            "recovered DNS from stale backup at {} — previous run did not clean up",
+            dns_backup_path.display()
+        ),
+        Ok(false) => {}
+        Err(e) => log::warn!("failed to restore stale dns backup: {}", e),
+    }
+    #[cfg(target_os = "macos")]
+    match RouteManager::restore_from_stale_backup(&route_backup_path) {
+        Ok(true) => log::warn!(
+            "recovered VPN server host route from stale backup at {} — previous run did not clean up",
+            route_backup_path.display()
+        ),
+        Ok(false) => {}
+        Err(e) => log::warn!("failed to restore stale route backup: {}", e),
     }
 
     loop {
