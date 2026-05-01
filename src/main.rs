@@ -4,6 +4,8 @@ mod config;
 mod dns;
 mod qrcode;
 mod resp;
+#[cfg(target_os = "macos")]
+mod route;
 mod state;
 mod template;
 mod totp;
@@ -15,6 +17,8 @@ use is_elevated;
 
 #[cfg(target_os = "macos")]
 use dns::DNSManager;
+#[cfg(target_os = "macos")]
+use route::RouteManager;
 
 use std::env;
 use std::process::exit;
@@ -114,6 +118,28 @@ async fn run() -> Result<()> {
         Err(e) => log::warn!("failed to restore stale dns backup: {}", e),
     }
 
+    // Same idea for the VPN-server host route used in full-route mode:
+    // if the previous run died before unpin() it left a /32 host route
+    // pinned to the (now-irrelevant) old gateway, which can break
+    // outbound connectivity even after the tunnel is gone.
+    #[cfg(target_os = "macos")]
+    let route_backup_path: std::path::PathBuf = {
+        let conf_path = std::path::Path::new(&cli.conf_file);
+        let conf_dir = conf_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        conf_dir.join("route_backup.json")
+    };
+    #[cfg(target_os = "macos")]
+    match RouteManager::restore_from_stale_backup(&route_backup_path) {
+        Ok(true) => log::warn!(
+            "recovered VPN server host route from stale backup at {} — previous run did not clean up",
+            route_backup_path.display()
+        ),
+        Ok(false) => {}
+        Err(e) => log::warn!("failed to restore stale route backup: {}", e),
+    }
+
     let mut conf = Config::from_file(&cli.conf_file)
         .await
         .context("failed to load config")?;
@@ -127,6 +153,8 @@ async fn run() -> Result<()> {
 
     #[cfg(target_os = "macos")]
     let use_vpn_dns = conf.use_vpn_dns.unwrap_or(false);
+    #[cfg(target_os = "macos")]
+    let use_full_route = conf.use_full_route.unwrap_or(false);
 
     if conf.server.is_none() {
         let resp = client::get_company_url(conf.company_name.as_str())
@@ -219,6 +247,8 @@ async fn run() -> Result<()> {
 
     #[cfg(target_os = "macos")]
     let mut dns_manager = DNSManager::new(dns_backup_path.clone());
+    #[cfg(target_os = "macos")]
+    let mut route_manager = RouteManager::new(route_backup_path.clone());
 
     #[cfg(target_os = "macos")]
     if use_vpn_dns {
@@ -227,6 +257,22 @@ async fn run() -> Result<()> {
             Err(err) => {
                 log::warn!("failed to set dns: {}", err);
             }
+        }
+    }
+
+    // Full-route mode covers 0.0.0.0/0 — even the wg outer UDP packets
+    // would loop back into utun and the link dies. Pin a host route for
+    // the VPN server's IP via the original default gateway.
+    #[cfg(target_os = "macos")]
+    if use_full_route {
+        let server_ip = wg_conf
+            .peer_address
+            .split(':')
+            .next()
+            .unwrap_or(&wg_conf.peer_address)
+            .to_string();
+        if let Err(err) = route_manager.pin_vpn_server(&server_ip) {
+            log::warn!("failed to pin VPN server host route: {}", err);
         }
     }
 
@@ -274,6 +320,9 @@ async fn run() -> Result<()> {
             }
         }
     }
+
+    #[cfg(target_os = "macos")]
+    route_manager.unpin();
 
     log::info!("reach exit");
     exit(exit_code)
