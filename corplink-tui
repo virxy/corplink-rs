@@ -21,6 +21,25 @@ if [[ $EUID -ne 0 ]]; then
 fi
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
+# After self-elevate, every internal `sudo XXX` adds no privilege
+# (we're already root) but the real sudo binary still fork+execs
+# the child through PAM / setuid. On machines with leftover EDR
+# Endpoint Security hooks (Sangfor / EasyConnect / similar
+# corporate-VPN stragglers), that PAM-driven exec path occasionally
+# trips the hook and the child gets SIGKILL'd silently — the symptom
+# was "sudo corplink-rs --list" dying with `killed` and no stderr.
+# Shadow sudo with a function that just strips the leading word and
+# runs the rest in-process. The earlier self-elevate (line above)
+# uses /usr/bin/sudo because this function isn't defined yet; from
+# this point on, every "sudo XXX" inside the script bypasses sudo
+# entirely. `sudo -v` is special-cased because it has no equivalent.
+sudo() {
+    case "${1:-}" in
+        -v) return 0 ;;
+        *)  "$@" ;;
+    esac
+}
+
 # resolve through any chain of symlinks (so `fl` -> ~/.corplink-rs/corplink-tui still works)
 _self="$0"
 while [ -L "$_self" ]; do
