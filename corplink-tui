@@ -34,6 +34,19 @@ BIN="$ROOT/corplink-rs"
 CONF="$ROOT/config.json"
 LOG="$ROOT/run.log"
 LIST_ERR="$ROOT/.list.err"
+
+# Self-elevate writes everything as root (config, cookies, dns_backup,
+# logs) — that pollutes ~/.corplink-rs so plain user tools (jq / vim /
+# editors) can't read or rewrite the files afterwards. On exit, hand
+# ownership back to the original invoker so the data dir stays
+# user-owned. Only chown if we know the original user (sudo sets
+# SUDO_USER); skip silently if invoked as root directly.
+if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then
+    _restore_ownership() {
+        chown -R "$SUDO_USER" "$ROOT" 2>/dev/null || true
+    }
+    trap _restore_ownership EXIT INT TERM
+fi
 LOGIN_ERR="$ROOT/.login.err"
 
 mkdir -p "$ROOT"
