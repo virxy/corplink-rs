@@ -349,6 +349,37 @@ action_routes() {
     fi
 }
 
+action_full_route() {
+    hr
+    local cur
+    cur="$(jq -r '.use_full_route // false' "$CONF")"
+    local label
+    [[ "$cur" == "true" ]] && label="全局 (full)" || label="分流 (split)"
+    echo "当前模式: $label"
+    echo
+    echo "  full:   所有 IPv4 走 VPN。服务端下发 vpn_route_full"
+    echo "          (0.0.0.0/1 + 128.0.0.0/1) — 不顶替 default route,"
+    echo "          也不会让 VPN server 自身回环。"
+    echo "  split:  只有公司内网/服务走 VPN,公网走原 ISP。用 vpn_route_split。"
+    hr
+    local pick
+    pick="$(printf 'Toggle (切到对面)\nKeep current\n' \
+        | fzf --prompt='full route> ' --height=30% --reverse --no-sort \
+              --header="切换 full route 模式")" || pick="Keep current"
+    case "${pick:-Keep current}" in
+        Toggle*)
+            local new
+            [[ "$cur" == "true" ]] && new=false || new=true
+            local tmp; tmp="$(mktemp)"
+            jq --argjson v "$new" '.use_full_route = $v' "$CONF" > "$tmp" \
+                && mv "$tmp" "$CONF"
+            echo "✓ use_full_route: $cur → $new"
+            maybe_reconnect
+            ;;
+        *) echo "(取消)" ;;
+    esac
+}
+
 action_repair_dns() {
     hr
     echo "→ 重置所有网络服务的 DNS,修复 fl 异常退出后系统 DNS 被钉死的问题"
@@ -577,7 +608,7 @@ EOF
 
 while true; do
     status="$(detect_status)"
-    pick="$(printf 'Switch node\nReconnect\nDisconnect\nRoutes\nStatus\nRe-login\nRepair DNS\nPurge official Feilian\nQuit\n' \
+    pick="$(printf 'Switch node\nReconnect\nDisconnect\nRoutes\nFull route\nStatus\nRe-login\nRepair DNS\nPurge official Feilian\nQuit\n' \
         | fzf --prompt='action> ' --height=40% --reverse --no-sort \
               --header="$status")" || pick=""
     case "${pick:-}" in
@@ -585,6 +616,7 @@ while true; do
         "Reconnect")                action_reconnect ;;
         "Disconnect")               action_disconnect ;;
         "Routes")                   action_routes ;;
+        "Full route")               action_full_route ;;
         "Status")                   action_status ;;
         "Re-login")                 action_relogin ;;
         "Repair DNS")               action_repair_dns ;;
